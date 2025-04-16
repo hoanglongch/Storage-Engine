@@ -10,12 +10,30 @@
 #include <netinet/in.h>
 #include <unistd.h>
 
+// Include OpenSSL headers for TLS and SHA256.
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/sha.h>
+
 // Include the generated Protocol Buffers header.
 // Make sure to compile replication.proto with protoc to generate replication.pb.h and replication.pb.cc.
 #include "replication.pb.h"
 
 #define REPLICA_DEFAULT_PORT 6000
 #define MAX_RETRY 3
+
+// Helper function to compute SHA256 hash of the message.
+static std::string computeSHA256(const std::string &data) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256_CTX sha256;
+    if (!SHA256_Init(&sha256))
+        ErrorHandler::handleError(ErrorCode::REPLICATION_SERIALIZE_FAILURE, "SHA256_Init failed");
+    if (!SHA256_Update(&sha256, data.c_str(), data.size()))
+        ErrorHandler::handleError(ErrorCode::REPLICATION_SERIALIZE_FAILURE, "SHA256_Update failed");
+    if (!SHA256_Final(hash, &sha256))
+        ErrorHandler::handleError(ErrorCode::REPLICATION_SERIALIZE_FAILURE, "SHA256_Final failed");
+    return std::string(reinterpret_cast<char*>(hash), SHA256_DIGEST_LENGTH);
+}
 
 ReplicationProtocol::ReplicationProtocol() {
     // In a real-world scenario, you might derive this from configuration.
@@ -62,7 +80,7 @@ std::string ReplicationProtocol::chooseReplicaNode(const std::string &key) {
 bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress, const std::string &message) {
     // Parse nodeAddress in the form "IP:port". Use default port if unspecified.
     std::string ip;
-    int port = REPLICA_DEFAULT_PORT; // Default port.
+    int port = REPLICA_DEFAULT_PORT;
     size_t colonPos = nodeAddress.find(':');
     if (colonPos != std::string::npos) {
         ip = nodeAddress.substr(0, colonPos);
@@ -71,6 +89,7 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
         ip = nodeAddress;
     }
 
+    // Create a plain TCP socket.
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         ErrorHandler::logError("[ReplicationProtocol] Socket creation failed.");
@@ -81,13 +100,13 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
     std::memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(port);
-
     if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
         ErrorHandler::logError("[ReplicationProtocol] Invalid IP address: " + ip);
         close(sockfd);
         return false;
     }
 
+    // Connect with retries and exponential backoff.
     int retry = 0;
     bool connected = false;
     while (retry < MAX_RETRY && !connected) {
@@ -100,7 +119,6 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
             retry++;
         }
     }
-
     if (!connected) {
         ErrorHandler::logError("[ReplicationProtocol] Failed to connect to " + nodeAddress +
                                  " after " + std::to_string(MAX_RETRY) + " attempts.");
@@ -108,23 +126,65 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
         return false;
     }
 
-    // Send the length of the message (as 4-byte network order integer).
-    uint32_t msgLength = htonl(message.size());
-    if (send(sockfd, &msgLength, sizeof(msgLength), 0) != sizeof(msgLength)) {
-        ErrorHandler::logError("[ReplicationProtocol] Failed to send message length.");
+    // Initialize OpenSSL for a TLS client connection.
+    SSL_library_init();
+    SSL_load_error_strings();
+    const SSL_METHOD *method = TLS_client_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        ErrorHandler::logError("[ReplicationProtocol] SSL_CTX_new failed.");
+        close(sockfd);
+        return false;
+    }
+    // In a complete solution, load client certificates and set verification options.
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) {
+        ErrorHandler::logError("[ReplicationProtocol] SSL_new failed.");
+        SSL_CTX_free(ctx);
+        close(sockfd);
+        return false;
+    }
+    SSL_set_fd(ssl, sockfd);
+    if (SSL_connect(ssl) <= 0) {
+        ErrorHandler::logError("[ReplicationProtocol] SSL_connect failed.");
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
         close(sockfd);
         return false;
     }
 
-    // Send the serialized message.
-    ssize_t sentBytes = send(sockfd, message.c_str(), message.size(), 0);
-    if (sentBytes != (ssize_t)message.size()) {
-        ErrorHandler::logError("[ReplicationProtocol] Failed to send the entire replication message.");
-        close(sockfd);
-        return false;
+    // Compute the SHA256 hash of the message.
+    std::string hash = computeSHA256(message);
+
+    // Build the final packet:
+    // Packet format: [4-byte network order message length][message][32-byte SHA256 hash]
+    uint32_t netMsgLength = htonl(message.size());
+    std::string packet(reinterpret_cast<char*>(&netMsgLength), sizeof(netMsgLength));
+    packet.append(message);
+    packet.append(hash);
+
+    // Send the complete packet using SSL_write.
+    int totalSent = 0;
+    int packetSize = packet.size();
+    while (totalSent < packetSize) {
+        int sent = SSL_write(ssl, packet.c_str() + totalSent, packetSize - totalSent);
+        if (sent <= 0) {
+            ErrorHandler::logError("[ReplicationProtocol] SSL_write failed during packet transmission.");
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            SSL_CTX_free(ctx);
+            close(sockfd);
+            return false;
+        }
+        totalSent += sent;
     }
 
-    ErrorHandler::logInfo("[ReplicationProtocol] Replication message sent successfully to " + nodeAddress);
+    ErrorHandler::logInfo("[ReplicationProtocol] Secure replication message sent successfully to " + nodeAddress);
+
+    // Shutdown the SSL connection and free resources.
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
     close(sockfd);
     return true;
 }
