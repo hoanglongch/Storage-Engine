@@ -97,8 +97,18 @@ void IOMonitor::checkStatus() {
     } else {
         std::cerr << "[IOMonitor] Failed to read from eBPF map: " << strerror(errno) << std::endl;
     }
-
-    // In a full solution, you could export these metrics to a REST API, file, or push them to Prometheus.
-    // For now, we simulate continuous monitoring with a sleep.
+    
+    // Sleep briefly before the next check.
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+}
+
+std::string IOMonitor::getMetricsJSON() {
+    uint32_t key = 0;
+    uint64_t value = 0;
+    int err = bpf_map_lookup_elem(bpf_map_fd, &key, &value);
+    if (err == 0) {
+        return "{\"sys_read\": " + std::to_string(value) + "}";
+    } else {
+        return "{\"error\": \"Unable to retrieve metrics\"}";
+    }
 }
