@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package replication;
+
+// Message for data replication
+message ReplicationData {
+    string key = 1;
+    bytes value = 2;
+    uint64 timestamp = 3;
+    repeated uint32 vector_clock = 4;
+}
