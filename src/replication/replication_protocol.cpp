@@ -1,4 +1,5 @@
 #include "replication_protocol.h"
+#include "error_handler.h"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -26,12 +27,12 @@ ReplicationProtocol::~ReplicationProtocol() {
 }
 
 bool ReplicationProtocol::initialize() {
-    std::cout << "[ReplicationProtocol] Initializing replication protocol..." << std::endl;
+    ErrorHandler::logInfo("[ReplicationProtocol] Initializing replication protocol...");
     if (!setupReplication()) {
-        std::cerr << "[ReplicationProtocol] Failed to set up replication protocol." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to set up replication protocol.");
         return false;
     }
-    std::cout << "[ReplicationProtocol] Replication protocol initialized successfully." << std::endl;
+    ErrorHandler::logInfo("[ReplicationProtocol] Replication protocol initialized successfully.");
     return true;
 }
 
@@ -47,7 +48,7 @@ bool ReplicationProtocol::setupReplication() {
     }
     vectorClock[localNodeID] = 0;
 
-    std::cout << "[ReplicationProtocol] Consistent hash ring and vector clocks set up." << std::endl;
+    ErrorHandler::logInfo("[ReplicationProtocol] Consistent hash ring and vector clocks set up.");
     return true;
 }
 
@@ -61,8 +62,7 @@ std::string ReplicationProtocol::chooseReplicaNode(const std::string &key) {
 bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress, const std::string &message) {
     // Parse nodeAddress in the form "IP:port". Use default port if unspecified.
     std::string ip;
-    int port = REPLICA_DEFAULT_PORT; // default port value
-
+    int port = REPLICA_DEFAULT_PORT; // Default port.
     size_t colonPos = nodeAddress.find(':');
     if (colonPos != std::string::npos) {
         ip = nodeAddress.substr(0, colonPos);
@@ -73,7 +73,7 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        std::cerr << "[ReplicationProtocol] Socket creation failed." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Socket creation failed.");
         return false;
     }
 
@@ -83,7 +83,7 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
     serverAddr.sin_port = htons(port);
 
     if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
-        std::cerr << "[ReplicationProtocol] Invalid IP address: " << ip << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Invalid IP address: " + ip);
         close(sockfd);
         return false;
     }
@@ -94,14 +94,16 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
         if (connect(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) == 0) {
             connected = true;
         } else {
-            std::cerr << "[ReplicationProtocol] Connection attempt " << retry + 1 << " to " << nodeAddress << " failed." << std::endl;
+            ErrorHandler::logWarning("[ReplicationProtocol] Connection attempt " + std::to_string(retry + 1) +
+                                      " to " + nodeAddress + " failed.");
             std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << retry)));
             retry++;
         }
     }
 
     if (!connected) {
-        std::cerr << "[ReplicationProtocol] Failed to connect to " << nodeAddress << " after " << MAX_RETRY << " attempts." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to connect to " + nodeAddress +
+                                 " after " + std::to_string(MAX_RETRY) + " attempts.");
         close(sockfd);
         return false;
     }
@@ -109,7 +111,7 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
     // Send the length of the message (as 4-byte network order integer).
     uint32_t msgLength = htonl(message.size());
     if (send(sockfd, &msgLength, sizeof(msgLength), 0) != sizeof(msgLength)) {
-        std::cerr << "[ReplicationProtocol] Failed to send message length." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to send message length.");
         close(sockfd);
         return false;
     }
@@ -117,18 +119,18 @@ bool ReplicationProtocol::sendReplicationMessage(const std::string &nodeAddress,
     // Send the serialized message.
     ssize_t sentBytes = send(sockfd, message.c_str(), message.size(), 0);
     if (sentBytes != (ssize_t)message.size()) {
-        std::cerr << "[ReplicationProtocol] Failed to send the entire replication message." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to send the entire replication message.");
         close(sockfd);
         return false;
     }
 
-    std::cout << "[ReplicationProtocol] Replication message sent successfully to " << nodeAddress << std::endl;
+    ErrorHandler::logInfo("[ReplicationProtocol] Replication message sent successfully to " + nodeAddress);
     close(sockfd);
     return true;
 }
 
 void ReplicationProtocol::replicateData() {
-    std::cout << "[ReplicationProtocol] Replicating data using the established protocol..." << std::endl;
+    ErrorHandler::logInfo("[ReplicationProtocol] Replicating data using the established protocol...");
 
     // Create a replication message using Protocol Buffers.
     replication::ReplicationData repMsg;
@@ -136,7 +138,7 @@ void ReplicationProtocol::replicateData() {
     repMsg.set_value("sample_value");
     repMsg.set_timestamp(static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()));
 
-    // Update local vector clock.
+    // Update the local vector clock.
     vectorClock[localNodeID] += 1;
 
     // Clear previous vector clock data and insert current vector clock values.
@@ -148,7 +150,7 @@ void ReplicationProtocol::replicateData() {
     // Serialize the message to a string.
     std::string serializedMessage;
     if (!repMsg.SerializeToString(&serializedMessage)) {
-        std::cerr << "[ReplicationProtocol] Failed to serialize replication message." << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to serialize replication message.");
         return;
     }
 
@@ -157,8 +159,8 @@ void ReplicationProtocol::replicateData() {
 
     // Send the replication message to the selected node.
     if (!sendReplicationMessage(replicaNode, serializedMessage)) {
-        std::cerr << "[ReplicationProtocol] Failed to send replication message to " << replicaNode << std::endl;
+        ErrorHandler::logError("[ReplicationProtocol] Failed to send replication message to " + replicaNode);
     } else {
-        std::cout << "[ReplicationProtocol] Replication message sent to " << replicaNode << std::endl;
+        ErrorHandler::logInfo("[ReplicationProtocol] Replication message sent to " + replicaNode);
     }
 }

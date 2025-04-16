@@ -1,57 +1,68 @@
 #include <iostream>
-#include <thread>
 #include "storage/storage_engine.h"
 #include "cache/distributed_cache.h"
 #include "replication/replication_protocol.h"
 #include "monitoring/io_monitor.h"
 #include "monitoring/rest_server.h"
+#include "error_handler.h"
+#include "thread_pool.h"
 
 int main() {
-    // Initialize Storage Engine
+    // Initialize Storage Engine.
     StorageEngine storage;
     if (!storage.initialize()) {
-        std::cerr << "Failed to initialize storage engine." << std::endl;
+        ErrorHandler::logError("Failed to initialize storage engine.");
         return -1;
     }
     
-    // Initialize Distributed Cache
+    // Initialize Distributed Cache.
     DistributedCache cache;
     if (!cache.initialize()) {
-        std::cerr << "Failed to initialize distributed cache." << std::endl;
+        ErrorHandler::logError("Failed to initialize distributed cache.");
         return -1;
     }
     
-    // Initialize Replication Protocol
+    // Initialize Replication Protocol.
     ReplicationProtocol replication;
     if (!replication.initialize()) {
-        std::cerr << "Failed to initialize replication protocol." << std::endl;
+        ErrorHandler::logError("Failed to initialize replication protocol.");
         return -1;
     }
     
-    // Initialize I/O Monitoring System
+    // Initialize I/O Monitoring.
     IOMonitor monitor;
     if (!monitor.initialize()) {
-        std::cerr << "Failed to initialize I/O monitoring system." << std::endl;
+        ErrorHandler::logError("Failed to initialize I/O monitoring system.");
         return -1;
     }
     
     // Start REST server for exporting metrics.
     RestServer restServer(8080, [&monitor]() { return monitor.getMetricsJSON(); });
     if (!restServer.start()) {
-        std::cerr << "Failed to start REST server." << std::endl;
+        ErrorHandler::logError("Failed to start REST server.");
         return -1;
     }
     
-    // Simulate main processing loop
-    std::cout << "System initialized. Running main loop..." << std::endl;
+    ErrorHandler::logInfo("System initialized. Running main loop with concurrency...");
+
+    // Create a thread pool with 4 worker threads.
+    ThreadPool pool(4);
     for (int i = 0; i < 10; ++i) {
-        storage.performIO();
-        cache.processRequests();
-        replication.replicateData();
-        monitor.checkStatus();
+        // Enqueue tasks concurrently.
+        auto ioFuture = pool.enqueue([&storage]() { storage.performIO(); });
+        auto cacheFuture = pool.enqueue([&cache]() { cache.processRequests(); });
+        auto replFuture = pool.enqueue([&replication]() { replication.replicateData(); });
+        auto monFuture = pool.enqueue([&monitor]() { monitor.checkStatus(); });
+
+        // Wait for all tasks of this iteration to complete.
+        ioFuture.get();
+        cacheFuture.get();
+        replFuture.get();
+        monFuture.get();
     }
     
-    std::cout << "System shutting down." << std::endl;
+    ErrorHandler::logInfo("System shutting down.");
     restServer.stop();
+    pool.shutdown();
     return 0;
 }

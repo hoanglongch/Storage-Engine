@@ -1,13 +1,14 @@
 #include "distributed_cache.h"
-#include <iostream>
-#include <cstring>
+#include "error_handler.h"
 #include "memory_allocator.h"
 #include <infiniband/verbs.h>
+#include <cstring>
 #include <thread>
 
 #define CQ_SIZE 16
 
 DistributedCache::DistributedCache()
+
     : rdmaContext(nullptr), protectionDomain(nullptr),
       completionQueue(nullptr), queuePair(nullptr), processedRequests(0)
 {
@@ -28,78 +29,78 @@ DistributedCache::~DistributedCache() {
     if (rdmaContext) {
         ibv_close_device(rdmaContext);
     }
-    std::cout << "[DistributedCache] RDMA resources cleaned up." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] RDMA resources cleaned up.");
 }
 
 bool DistributedCache::initialize() {
-    std::cout << "[DistributedCache] Initializing RDMA distributed cache..." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] Initializing RDMA distributed cache...");
     if (!initCacheSystem()) {
-        std::cerr << "[DistributedCache] Failed to initialize cache system." << std::endl;
+        ErrorHandler::logError("[DistributedCache] Failed to initialize cache system.");
         return false;
     }
-    std::cout << "[DistributedCache] Distributed cache initialized successfully." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] Distributed cache initialized successfully.");
     return true;
 }
 
 bool DistributedCache::initCacheSystem() {
-    // Initialize custom memory allocator
+    // Initialize custom memory allocator.
     if (!MemoryAllocator::initialize()) {
-        std::cerr << "[DistributedCache] Memory allocator initialization failed." << std::endl;
+        ErrorHandler::handleError(ErrorCode::MEMORY_ALLOC_FAILURE, "[DistributedCache] Memory allocator initialization failed.");
         return false;
     }
-    std::cout << "[DistributedCache] Memory allocator initialized successfully." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] Memory allocator initialized successfully.");
 
-    // Initialize RDMA components
+    // Initialize RDMA components.
     if (!initRDMA()) {
-        std::cerr << "[DistributedCache] RDMA initialization failed." << std::endl;
+        ErrorHandler::handleError(ErrorCode::RDMA_QP_CREATE_FAILURE, "[DistributedCache] RDMA initialization failed.");
         return false;
     }
     
-    // Initialize lock-free data structure(s), e.g. a lock-free counter for demonstration
+    // Initialize lock-free data structure(s).
     processedRequests.store(0);
-    std::cout << "[DistributedCache] Lock-free data structures initialized." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] Lock-free data structures initialized.");
     
     return true;
 }
 
 bool DistributedCache::initRDMA() {
-    std::cout << "[DistributedCache] Setting up RDMA connections..." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] Setting up RDMA connections...");
     
     int numDevices = 0;
     ibv_device** deviceList = ibv_get_device_list(&numDevices);
     if (!deviceList || numDevices == 0) {
-        std::cerr << "[DistributedCache] No RDMA devices found." << std::endl;
+        ErrorHandler::handleError(ErrorCode::RDMA_NO_DEVICES, "[DistributedCache] No RDMA devices found.");
         return false;
     }
     
-    // Open the first available RDMA device
+    // Open the first available RDMA device.
     rdmaContext = ibv_open_device(deviceList[0]);
     if (!rdmaContext) {
-        std::cerr << "[DistributedCache] Failed to open RDMA device." << std::endl;
         ibv_free_device_list(deviceList);
+        ErrorHandler::handleError(ErrorCode::RDMA_DEVICE_OPEN_FAILURE, "[DistributedCache] Failed to open RDMA device.");
         return false;
     }
     
-    // Allocate a protection domain
+    // Allocate a protection domain.
     protectionDomain = ibv_alloc_pd(rdmaContext);
     if (!protectionDomain) {
-        std::cerr << "[DistributedCache] Failed to allocate protection domain." << std::endl;
         ibv_close_device(rdmaContext);
         ibv_free_device_list(deviceList);
+        ErrorHandler::handleError(ErrorCode::RDMA_PD_ALLOC_FAILURE, "[DistributedCache] Failed to allocate protection domain.");
         return false;
     }
     
-    // Create a completion queue
+    // Create a completion queue.
     completionQueue = ibv_create_cq(rdmaContext, CQ_SIZE, nullptr, nullptr, 0);
     if (!completionQueue) {
-        std::cerr << "[DistributedCache] Failed to create completion queue." << std::endl;
         ibv_dealloc_pd(protectionDomain);
         ibv_close_device(rdmaContext);
         ibv_free_device_list(deviceList);
+        ErrorHandler::handleError(ErrorCode::RDMA_CQ_CREATE_FAILURE, "[DistributedCache] Failed to create completion queue.");
         return false;
     }
     
-    // Setup queue pair attributes
+    // Setup queue pair attributes.
     struct ibv_qp_init_attr qpInitAttr;
     std::memset(&qpInitAttr, 0, sizeof(qpInitAttr));
     qpInitAttr.send_cq = completionQueue;
@@ -112,17 +113,17 @@ bool DistributedCache::initRDMA() {
     
     queuePair = ibv_create_qp(protectionDomain, &qpInitAttr);
     if (!queuePair) {
-        std::cerr << "[DistributedCache] Failed to create queue pair." << std::endl;
         ibv_destroy_cq(completionQueue);
         ibv_dealloc_pd(protectionDomain);
         ibv_close_device(rdmaContext);
         ibv_free_device_list(deviceList);
+        ErrorHandler::handleError(ErrorCode::RDMA_QP_CREATE_FAILURE, "[DistributedCache] Failed to create queue pair.");
         return false;
     }
     
     ibv_free_device_list(deviceList);
     
-    std::cout << "[DistributedCache] RDMA connection established successfully." << std::endl;
+    ErrorHandler::logInfo("[DistributedCache] RDMA connection established successfully.");
     return true;
 }
 
@@ -132,7 +133,7 @@ void DistributedCache::processRequests() {
     // perform zero-copy data transfers, and manage session state.
     // For demonstration, we increment a lock-free counter.
     processedRequests.fetch_add(1, std::memory_order_relaxed);
-    std::cout << "[DistributedCache] Processed request count: " << processedRequests.load() << std::endl;
-    
     // Additional RDMA send/receive logic and session management would be implemented here.
+    ErrorHandler::logInfo("[DistributedCache] Processed request count: " + std::to_string(processedRequests.load()));
 }
+
