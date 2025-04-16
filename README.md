@@ -33,5 +33,5 @@ make
 Execute the compiled binary:
 
 ```bash
-./HighPerformanceDistributedStorage
+./Storage-Engine
 ```
