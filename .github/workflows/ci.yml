@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++ libssl-dev libprotobuf-dev protobuf-compiler libibverbs-dev libbpf-dev clang llvm
+        # Optionally install additional static analysis tools if needed
+
+    - name: Configure CMake for Main Project
+      run: cmake -S . -B build
+    - name: Build Main Project
+      run: cmake --build build -- -j $(nproc)
+    
+    - name: Run Main Project (Optional)
+      run: ./build/HighPerformanceDistributedStorage
+    
+    - name: Configure CMake for Tests
+      run: cmake -S tests -B build_tests
+    - name: Build Tests
+      run: cmake --build build_tests -- -j $(nproc)
+    - name: Run Unit Tests
+      run: ctest --test-dir build_tests
+
+    # Optional: Add static analysis step, e.g., using clang-tidy
+    - name: Run clang-tidy
+      run: |
+        cmake --build build --target clang-tidy
